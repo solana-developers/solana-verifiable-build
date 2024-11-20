@@ -3,13 +3,20 @@ use solana_cli_config::Config;
 use solana_client::rpc_client::RpcClient;
 use std::{
     io::{self, Read, Write},
+    path::Path,
     str::FromStr,
 };
 
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
 use solana_sdk::{
-    commitment_config::CommitmentConfig, instruction::AccountMeta, message::Message,
-    pubkey::Pubkey, signature::Keypair, signer::Signer, system_program, transaction::Transaction,
+    commitment_config::CommitmentConfig,
+    instruction::AccountMeta,
+    message::Message,
+    pubkey::Pubkey,
+    signature::{read_keypair_file, Keypair},
+    signer::Signer,
+    system_program,
+    transaction::Transaction,
 };
 
 use crate::api::get_last_deployed_slot;
@@ -89,9 +96,8 @@ fn process_otter_verify_ixs(
     program_address: Pubkey,
     instruction: OtterVerifyInstructions,
     rpc_client: RpcClient,
+    signer: Keypair,
 ) -> anyhow::Result<()> {
-    let user_config = get_user_config()?;
-    let signer = user_config.0;
     let signer_pubkey = signer.pubkey();
     let connection = rpc_client;
 
@@ -145,8 +151,10 @@ pub async fn upload_program(
     args: Vec<String>,
     program_address: Pubkey,
     connection_url: Option<String>,
+    auto_upload_pda: bool,
+    keypair_path: Option<String>,
 ) -> anyhow::Result<()> {
-    if prompt_user_input(
+    if auto_upload_pda || prompt_user_input(
         &format!("Do you want to upload these parameters for program verification to the Solana Blockchain?\nProgram ID: {}\nGit URL: {}\nCommit Hash: {}\nArgs: {:?}\n(y/n) ",
             program_address,
             git_url,
@@ -158,7 +166,25 @@ pub async fn upload_program(
 
         let cli_config = get_user_config()?;
 
-        let signer_pubkey = cli_config.0.pubkey();
+        let keypair = match keypair_path {
+            Some(path) => {
+                // Try to read the keypair file, fallback to using the config keypair
+                read_keypair_file(&Path::new(&path)).unwrap_or_else(|_| {
+                    eprintln!(
+                        "Failed to read keypair file at '{}', using config.",
+                        path
+                    );
+                    cli_config.0
+                })
+            }
+            None => {
+                // No keypair path provided, using the keypair from the config
+                eprintln!("No keypair path provided, using config.");
+                cli_config.0
+            }
+        };
+
+        let signer_pubkey = keypair.pubkey();
         let connection = match connection_url.as_deref() {
             Some("m") => RpcClient::new("https://api.mainnet-beta.solana.com"),
             Some("d") => RpcClient::new("https://api.devnet.solana.com"),
@@ -209,6 +235,7 @@ pub async fn upload_program(
                 program_address,
                 OtterVerifyInstructions::Update,
                 connection,
+                keypair
             )?;
         } else if connection.get_account(&pda_account_2).is_ok() {
             let wanna_create_new_pda = prompt_user_input(
@@ -221,6 +248,7 @@ pub async fn upload_program(
                     program_address,
                     OtterVerifyInstructions::Initialize,
                     connection,
+                    keypair
                 )?;
             }
             return Ok(());
@@ -232,6 +260,7 @@ pub async fn upload_program(
                 program_address,
                 OtterVerifyInstructions::Initialize,
                 connection,
+                keypair
             )?;
         }
     } else {
@@ -241,11 +270,29 @@ pub async fn upload_program(
     Ok(())
 }
 
-pub async fn process_close(program_address: Pubkey) -> anyhow::Result<()> {
-    let user_config = get_user_config()?;
-    let signer = user_config.0;
+pub async fn process_close(
+    program_address: Pubkey,
+    keypair_path: Option<String>,
+) -> anyhow::Result<()> {
+    let cli_config = get_user_config()?;
+
+    let signer = match keypair_path {
+        Some(path) => {
+            // Try to read the keypair file, fallback to using the config keypair
+            read_keypair_file(&Path::new(&path)).unwrap_or_else(|_| {
+                eprintln!("Failed to read keypair file at '{}', using config.", path);
+                cli_config.0
+            })
+        }
+        None => {
+            // No keypair path provided, using the keypair from the config
+            eprintln!("No keypair path provided, using config.");
+            cli_config.0
+        }
+    };
+
     let signer_pubkey = signer.pubkey();
-    let connection = user_config.1;
+    let connection = cli_config.1;
     let rpc_url = connection.url();
 
     let last_deployed_slot = get_last_deployed_slot(&rpc_url, &program_address.to_string())
@@ -275,6 +322,7 @@ pub async fn process_close(program_address: Pubkey) -> anyhow::Result<()> {
             program_address,
             OtterVerifyInstructions::Close,
             connection,
+            signer,
         )?;
     } else {
         return Err(anyhow!(
