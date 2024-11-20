@@ -10,11 +10,10 @@ use solana_cli_config::{Config, CONFIG_FILE};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     bpf_loader_upgradeable::{self, UpgradeableLoaderState},
-    pubkey::Pubkey,
-};
+    pubkey::Pubkey};
 use std::{
     io::Read,
-    path::PathBuf,
+    path::{PathBuf},
     process::{exit, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -75,6 +74,15 @@ async fn main() -> anyhow::Result<()> {
             .global(true)
             .takes_value(true)
             .help("Optionally include your RPC endpoint. Defaults to Solana CLI config file"))
+        .arg(
+            Arg::with_name("keypair")
+                .short("k")
+                .long("keypair")
+                .value_name("KEYPAIR")
+                .global(true)
+                .takes_value(true)
+                .help("Filepath or URL to a keypair"),
+        )
         .subcommand(SubCommand::with_name("build")
             .about("Deterministically build the program in a Docker container")
             .arg(Arg::with_name("mount-directory")
@@ -163,6 +171,11 @@ async fn main() -> anyhow::Result<()> {
                 .long("base-image")
                 .takes_value(true)
                 .help("Optionally specify a custom base docker image to use for building"))
+            .arg(Arg::with_name("auto-upload-pda")
+                .short("y")
+                .long("auto-upload-pda")
+                .takes_value(false)
+                .help("Automatically upload the on chain verify PDA without the prompt"))
             .arg(Arg::with_name("library-name")
                 .long("library-name")
                 .takes_value(true)
@@ -189,6 +202,11 @@ async fn main() -> anyhow::Result<()> {
                 .required(true)
                 .takes_value(true)
                 .help("The HTTPS url of the repository to verify"))
+            .arg(Arg::with_name("auto-upload-pda")
+                .short("y")
+                .long("auto-upload-pda")
+                .takes_value(false)
+                .help("Automatically upload the on chain verify PDA without the prompt"))
             .arg(Arg::with_name("commit")
                 .long("commit")
                 .takes_value(true)
@@ -274,12 +292,14 @@ async fn main() -> anyhow::Result<()> {
             let base_image = sub_m.value_of("base-image").map(|s| s.to_string());
             let library_name = sub_m.value_of("library-name").map(|s| s.to_string());
             let bpf_flag = sub_m.is_present("bpf");
+            let auto_upload_pda = sub_m.is_present("auto-upload-pda");
             let current_dir = sub_m.is_present("current-dir");
             let cargo_args: Vec<String> = sub_m
                 .values_of("cargo-args")
                 .unwrap_or_default()
                 .map(|s| s.to_string())
                 .collect();
+            let keypair_path: Option<String> = matches.value_of("keypair").map(|s| s.to_string());
 
             verify_from_repo(
                 remote,
@@ -295,6 +315,8 @@ async fn main() -> anyhow::Result<()> {
                 current_dir,
                 &mut container_id,
                 &mut temp_dir,
+                auto_upload_pda,
+                keypair_path,
             )
             .await
         }
@@ -303,6 +325,9 @@ async fn main() -> anyhow::Result<()> {
             let git_url = sub_m.value_of("git-url").unwrap();
             let commit = sub_m.value_of("commit").map(|s| s.to_string());
             let url = matches.value_of("url").map(|s| s.to_string());
+            let auto_upload_pda: bool = sub_m.is_present("auto-upload-pda");
+            let keypair_path: Option<String> = matches.value_of("keypair").map(|s| s.to_string());
+
             // Check program id is valid
             Pubkey::try_from(program_id).map_err(|_| anyhow!("Invalid program id"))?;
 
@@ -318,13 +343,16 @@ async fn main() -> anyhow::Result<()> {
                 flags,
                 Pubkey::try_from(program_id)?,
                 url,
+                auto_upload_pda,
+                keypair_path,
             )
             .await?;
             Ok(())
         }
         ("close", Some(sub_m)) => {
             let program_id = sub_m.value_of("program-id").unwrap();
-            process_close(Pubkey::try_from(program_id)?).await
+            let keypair_path: Option<String> = matches.value_of("keypair").map(|s| s.to_string());
+            process_close(Pubkey::try_from(program_id)?, keypair_path).await
         }
         // Handle other subcommands in a similar manner, for now let's panic
         _ => panic!(
@@ -768,6 +796,8 @@ pub async fn verify_from_repo(
     current_dir: bool,
     container_id_opt: &mut Option<String>,
     temp_dir_opt: &mut Option<String>,
+    auto_upload_pda: bool,
+    keypair_path: Option<String>,
 ) -> anyhow::Result<()> {
     if remote {
         let genesis_hash = get_genesis_hash(connection_url)?;
@@ -940,6 +970,8 @@ pub async fn verify_from_repo(
                 args.iter().map(|&s| s.into()).collect(),
                 program_id,
                 connection_url,
+                auto_upload_pda,
+                keypair_path,
             )
             .await;
             if x.is_err() {
